@@ -114,7 +114,13 @@ local State = {
     CFrameSpeed = 4,
     InfiniteJump = false,
     Noclip = false,
-    AntiAFK = true
+    AntiAFK = true,
+
+    -- 7. Luyện Tập & Cuộc Đua Flappy (+5% Tốc Độ Mỗi Ống)
+    AutoFlappy = true,
+    AutoFlappyGodMode = true,
+    AutoFlappyAutoStart = true,
+    AutoTrain = false
 }
 
 local ALL_WALK_SPEEDS = {32, 50, 80, 100, 150, 200, 300, 500, 1000, 2500, 5000, 10000}
@@ -926,6 +932,162 @@ local function updateESP(enable)
 end
 
 -- ═══════════════════════════════════════════════════════════
+-- 🐦 AUTO FLAPPY RACE & SMART TRAINING HELPERS
+-- ═══════════════════════════════════════════════════════════
+
+local lastFlapTriggerTime = 0
+local function triggerFlap(container)
+    local now = os.clock()
+    if now - lastFlapTriggerTime < 0.08 then return end
+    lastFlapTriggerTime = now
+
+    -- Cách 1: Kích hoạt nút bấm nếu có
+    pcall(function()
+        if container then
+            for _, desc in ipairs(container:GetDescendants()) do
+                if (desc:IsA("TextButton") or desc:IsA("ImageButton")) and (desc.Visible == nil or desc.Visible == true) then
+                    if firesignal then
+                        pcall(function() firesignal(desc.Activated) end)
+                        pcall(function() firesignal(desc.MouseButton1Down) end)
+                        pcall(function() firesignal(desc.MouseButton1Click) end)
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Cách 2: Giả lập click chuột qua VirtualUser
+    pcall(function()
+        local center = Vector2.new(Workspace.CurrentCamera.ViewportSize.X / 2, Workspace.CurrentCamera.ViewportSize.Y / 2)
+        if container and container:IsA("GuiObject") and container.AbsolutePosition then
+            center = container.AbsolutePosition + (container.AbsoluteSize / 2)
+        end
+        VirtualUser:Button1Down(center, Workspace.CurrentCamera.CFrame)
+        task.wait(0.015)
+        VirtualUser:Button1Up(center, Workspace.CurrentCamera.CFrame)
+    end)
+
+    -- Cách 3: Phím Space nếu hỗ trợ
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        if vim then
+            vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.015)
+            vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end
+    end)
+end
+
+local function findFlappyGui()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil end
+
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") and (gui.Enabled == nil or gui.Enabled == true) then
+            local gName = gui.Name:lower()
+            if gName:find("flappy") or gName:find("train") or gName:find("minigame") or gName:find("race") then
+                return gui, nil, gui
+            end
+            
+            for _, desc in ipairs(gui:GetDescendants()) do
+                if desc:IsA("TextLabel") and (desc.Visible == nil or desc.Visible == true) then
+                    local txt = (desc.Text or ""):lower()
+                    if txt:find("flappy") or txt:find("nhấp để chơi") or txt:find("mỗi ống") or txt:find("tap to play") or txt:find("cuộc đua") then
+                        return gui, desc, desc.Parent
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function findBirdElement(container)
+    if not container then return nil end
+    local bestBird = nil
+
+    pcall(function()
+        for _, desc in ipairs(container:GetDescendants()) do
+            if desc:IsA("GuiObject") and (desc.Visible == nil or desc.Visible == true) then
+                local name = desc.Name:lower()
+                if name:find("bird") or name:find("char") or name:find("player") or name:find("avatar") or name:find("icon") or name:find("box") then
+                    bestBird = desc
+                    return
+                end
+            end
+        end
+    end)
+    return bestBird
+end
+
+local function findPipeElements(container, bird)
+    local pipes = {}
+    if not container then return pipes end
+
+    pcall(function()
+        local birdX = bird and (bird.AbsolutePosition.X) or 0
+
+        for _, desc in ipairs(container:GetDescendants()) do
+            if desc:IsA("GuiObject") and desc ~= bird and (desc.Visible == nil or desc.Visible == true) then
+                local name = desc.Name:lower()
+                if name:find("pipe") or name:find("obstacle") or name:find("column") or name:find("pillar") or name:find("wall") or name:find("bar") or name:find("ống") then
+                    local px = desc.AbsolutePosition.X
+                    if px + desc.AbsoluteSize.X >= birdX - 10 then
+                        table.insert(pipes, {
+                            Part = desc,
+                            X = px,
+                            Y = desc.AbsolutePosition.Y,
+                            W = desc.AbsoluteSize.X,
+                            H = desc.AbsoluteSize.Y
+                        })
+                    end
+                end
+            end
+        end
+
+        table.sort(pipes, function(a, b)
+            return a.X < b.X
+        end)
+    end)
+
+    return pipes
+end
+
+local function scanAndFireFlappyRemotes()
+    pcall(function()
+        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+            if desc:IsA("RemoteEvent") then
+                local rName = desc.Name:lower()
+                if rName:find("flappy") or rName:find("pipe") or rName:find("speedtrain") then
+                    pcall(function() desc:FireServer() end)
+                    pcall(function() desc:FireServer(true) end)
+                    pcall(function() desc:FireServer("PassPipe") end)
+                end
+            end
+        end
+    end)
+end
+
+local function findTrainingStations()
+    local stations = {}
+    pcall(function()
+        for _, desc in ipairs(Workspace:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local act = (desc.ActionText or ""):lower()
+                local obj = (desc.ObjectText or ""):lower()
+                local pName = desc.Parent.Name:lower()
+                if act:find("train") or act:find("tập") or act:find("luyện") or act:find("run") or act:find("chạy") or act:find("speed")
+                   or obj:find("train") or obj:find("tập") or obj:find("luyện") or obj:find("treadmill") or obj:find("speed")
+                   or pName:find("train") or pName:find("treadmill") or pName:find("workout") or pName:find("gym") then
+                    table.insert(stations, {Prompt = desc, Part = desc.Parent})
+                end
+            end
+        end
+    end)
+    return stations
+end
+
+-- ═══════════════════════════════════════════════════════════
 -- 🎨 MODERN OBSIDIAN & EMERALD GUI (STEAL AN EMPLOYEE)
 -- ═══════════════════════════════════════════════════════════
 
@@ -1450,6 +1612,36 @@ createToggleButton("🛡️ Chống Văng Game 24/7 (Anti-AFK)", State.AntiAFK, 
 end)
 
 -- ═══════════════════════════════════════════════════════════
+-- SECTION 7: 🏋️ LUYỆN TẬP & CUỘC ĐUA FLAPPY (+5% SPEED)
+-- ═══════════════════════════════════════════════════════════
+createSectionHeader("🏋️ LUYỆN TẬP & CUỘC ĐUA FLAPPY", Color3.fromRGB(255, 215, 0))
+
+createToggleButton("🎮 Tự Động Chơi Cuộc Đua Flappy (+5% Tốc Độ)", State.AutoFlappy, function(v)
+    State.AutoFlappy = v
+    setStatus(v and "Đã BẬT Auto Flappy (Tự né ống kiếm +5% speed/ống)!" or "Đã TẮT Auto Flappy.")
+end)
+
+createToggleButton("⚡ Flappy God Mode (Căn Khe Hở Chuẩn 100%)", State.AutoFlappyGodMode, function(v)
+    State.AutoFlappyGodMode = v
+    setStatus(v and "Flappy God Mode: BẬT (Căn tâm khe hở hoàn hảo)" or "Flappy God Mode: TẮT")
+end)
+
+createToggleButton("👆 Tự Động Nhấp Bắt Đầu (Auto Tap To Play)", State.AutoFlappyAutoStart, function(v)
+    State.AutoFlappyAutoStart = v
+end)
+
+createToggleButton("🏃 Tự Động Vào Máy Luyện Tập (Auto Treadmill)", State.AutoTrain, function(v)
+    State.AutoTrain = v
+    setStatus(v and "Đã BẬT Auto Treadmill (Tự động vào máy chạy bộ)!" or "Đã TẮT Auto Treadmill.")
+end)
+
+createActionButton("🎯 Thử Nhấp Nhảy Flappy 1 Lần", "Bấm để kiểm tra phản hồi nhấp nhảy của chim Flappy", Color3.fromRGB(255, 215, 0), function()
+    local gui, label, container = findFlappyGui()
+    triggerFlap(container or gui)
+    setStatus("🎯 Đã gửi tín hiệu nhấp nhảy Flappy!")
+end)
+
+-- ═══════════════════════════════════════════════════════════
 -- 🏃 MOVEMENT & INPUT HOOKS
 -- ═══════════════════════════════════════════════════════════
 pcall(function()
@@ -1826,7 +2018,101 @@ task.spawn(function()
     end
 end)
 
--- 8. Kích hoạt FPS Boost ngay khi chạy
+-- 8. 🐦 AUTO FLAPPY RACE & SMART TRAINING WORKER
+task.spawn(function()
+    local lastFlap = 0
+    local lastTrainScan = 0
+
+    while true do
+        task.wait(0.035)
+
+        -- A. Tự động chơi Cuộc đua Flappy (+5% Tốc Độ Mỗi Ống)
+        if State.AutoFlappy then
+            pcall(function()
+                local flappyGui, flappyLabel, gameArea = findFlappyGui()
+                if flappyGui then
+                    -- 1. Tự động nhấp để bắt đầu chơi nếu đang ở màn hình chờ
+                    if State.AutoFlappyAutoStart and flappyLabel and (flappyLabel.Visible == nil or flappyLabel.Visible == true) then
+                        local lTxt = (flappyLabel.Text or ""):lower()
+                        if lTxt:find("nhấp") or lTxt:find("chơi") or lTxt:find("tap") or lTxt:find("play") or lTxt:find("click") then
+                            local now = os.clock()
+                            if now - lastFlap > 0.35 then
+                                triggerFlap(gameArea or flappyGui)
+                                lastFlap = now
+                            end
+                        end
+                    end
+
+                    -- 2. Quét vị trí Chú Chim (Bird) và Ống (Pipes)
+                    local bird = findBirdElement(gameArea or flappyGui)
+                    local pipes = findPipeElements(gameArea or flappyGui, bird)
+                    local area = gameArea or (bird and bird.Parent) or flappyGui
+
+                    if bird and area then
+                        local birdCenterY = bird.AbsolutePosition.Y + (bird.AbsoluteSize.Y / 2)
+                        local targetGapY = nil
+
+                        if State.AutoFlappyGodMode and #pipes > 0 then
+                            local closestPipe = pipes[1]
+                            if closestPipe.Part then
+                                targetGapY = closestPipe.Part.AbsolutePosition.Y + (closestPipe.Part.AbsoluteSize.Y / 2)
+                            end
+                        end
+
+                        if not targetGapY then
+                            targetGapY = area.AbsolutePosition.Y + (area.AbsoluteSize.Y * 0.48)
+                        end
+
+                        local now = os.clock()
+                        if (birdCenterY > targetGapY + 3) and (now - lastFlap > 0.12) then
+                            triggerFlap(area)
+                            lastFlap = now
+                        end
+                    else
+                        -- Fallback duy trì nhịp nhảy nhịp nhàng
+                        local now = os.clock()
+                        if now - lastFlap > 0.32 then
+                            triggerFlap(area or flappyGui)
+                            lastFlap = now
+                        end
+                    end
+
+                    scanAndFireFlappyRemotes()
+                end
+            end)
+        end
+
+        -- B. Tự động bước vào máy chạy bộ / trạm luyện tập (Auto Treadmill)
+        if State.AutoTrain then
+            local now = os.clock()
+            if now - lastTrainScan > 2.0 then
+                lastTrainScan = now
+                pcall(function()
+                    local flappyGui = findFlappyGui()
+                    if not flappyGui then
+                        local hrp = getRootPart()
+                        local stations = findTrainingStations()
+                        if hrp and #stations > 0 then
+                            table.sort(stations, function(a, b)
+                                local d1 = (hrp.Position - a.Part.Position).Magnitude
+                                local d2 = (hrp.Position - b.Part.Position).Magnitude
+                                return d1 < d2
+                            end)
+                            local target = stations[1]
+                            if (hrp.Position - target.Part.Position).Magnitude > 6 then
+                                hrp.CFrame = target.Part.CFrame * CFrame.new(0, 3, 0)
+                            end
+                            task.wait(0.08)
+                            firePromptAction(target.Prompt)
+                        end
+                    end
+                end)
+            end
+        end
+    end
+end)
+
+-- 9. Kích hoạt FPS Boost ngay khi chạy
 pcall(function()
     Lighting.GlobalShadows = false
     Lighting.FogEnd = 9e9

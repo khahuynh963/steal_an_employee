@@ -62,8 +62,15 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/khahuynh963/steal_an_
 * **🌀 CFrame Glide:** Lướt siêu tốc CFrame không bị game cản trở.
 * **🦘 Infinite Jump:** Nhảy vô hạn trên không trung.
 * **👻 Noclip:** Đi xuyên mọi bờ tường công ty.
+* **🚪 Pha CFrame Xuyên Cửa (25m):** Lướt xuyên qua các cổng an toàn, chướng ngại vật và cửa checkpoint.
 * **🛡️ Anti-AFK 24/7:** Chống disconnect khi treo máy xuyên đêm.
 * **📱 Giao diện Cyberpunk Draggable:** Nút thu nhỏ/mở rộng hình chiếc cặp 💼 kéo thả mượt mà trên Mobile Touch và PC Mouse.
+
+### 🏋️ **7. Tự Động Luyện Tập & Cuộc Đua Flappy (+5% Tốc Độ Mỗi Ống)**
+* **🎮 Auto Chơi Flappy:** Tự động phát hiện khi giao diện *"Cuộc đua FLAPPY"* xuất hiện lúc bạn luyện tập, tự động nhấp để chơi ("Tap to play").
+* **⚡ Flappy God Mode:** Quét vị trí chú chim và các khe hở của ống phía trước, tự động tính toán thời điểm nhấp nhảy chính xác tuyệt đối để bay xuyên qua tâm ống, không bao giờ đâm trúng ống.
+* **📈 Tăng Tốc Siêu Tốc (+5%/Ống):** Tích lũy chuỗi né ống bất tận giúp nhận thưởng bonus % tốc độ liên tục không giới hạn.
+* **🏃 Auto Treadmill / Training:** Tự động tìm và bước vào các máy chạy bộ/khu vực luyện tập trong game để cày chỉ số tốc độ 24/7.
 
 ---
 
