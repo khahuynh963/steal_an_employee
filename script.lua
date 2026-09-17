@@ -932,125 +932,186 @@ local function updateESP(enable)
 end
 
 -- ═══════════════════════════════════════════════════════════
--- 🐦 AUTO FLAPPY RACE & SMART TRAINING HELPERS
+-- 🐦 AUTO FLAPPY RACE & SMART TRAINING HELPERS V2.0
 -- ═══════════════════════════════════════════════════════════
 
 local lastFlapTriggerTime = 0
-local function triggerFlap(container)
+local function performFlap(info)
     local now = os.clock()
-    if now - lastFlapTriggerTime < 0.08 then return end
+    if now - lastFlapTriggerTime < 0.07 then return end
     lastFlapTriggerTime = now
 
-    -- Cách 1: Kích hoạt nút bấm nếu có
+    local playArea = info and (info.PlayArea or info.MainFrame)
+    local clickX, clickY = 1000, 380
+
+    if playArea and playArea.AbsolutePosition and playArea.AbsoluteSize then
+        clickX = playArea.AbsolutePosition.X + (playArea.AbsoluteSize.X / 2)
+        clickY = playArea.AbsolutePosition.Y + (playArea.AbsoluteSize.Y / 2)
+    end
+
+    -- 1. VirtualInputManager Mouse Click (Tác động chuột trực tiếp lên GUI tại tọa độ PlayArea)
     pcall(function()
-        if container then
-            for _, desc in ipairs(container:GetDescendants()) do
-                if (desc:IsA("TextButton") or desc:IsA("ImageButton")) and (desc.Visible == nil or desc.Visible == true) then
-                    if firesignal then
-                        pcall(function() firesignal(desc.Activated) end)
-                        pcall(function() firesignal(desc.MouseButton1Down) end)
-                        pcall(function() firesignal(desc.MouseButton1Click) end)
-                    end
-                end
-            end
+        local vim = game:GetService("VirtualInputManager")
+        if vim then
+            vim:SendMouseButtonEvent(clickX, clickY, 0, true, game, 1)
+            task.wait(0.01)
+            vim:SendMouseButtonEvent(clickX, clickY, 0, false, game, 1)
         end
     end)
 
-    -- Cách 2: Giả lập click chuột qua VirtualUser
+    -- 2. VirtualInputManager Touch Tap (Cho thiết bị di động / Mobile Touch)
     pcall(function()
-        local center = Vector2.new(Workspace.CurrentCamera.ViewportSize.X / 2, Workspace.CurrentCamera.ViewportSize.Y / 2)
-        if container and container:IsA("GuiObject") and container.AbsolutePosition then
-            center = container.AbsolutePosition + (container.AbsoluteSize / 2)
+        local vim = game:GetService("VirtualInputManager")
+        if vim then
+            vim:SendTouchEvent(0, 0, clickX, clickY)
+            task.wait(0.01)
+            vim:SendTouchEvent(0, 2, clickX, clickY)
         end
-        VirtualUser:Button1Down(center, Workspace.CurrentCamera.CFrame)
-        task.wait(0.015)
-        VirtualUser:Button1Up(center, Workspace.CurrentCamera.CFrame)
     end)
 
-    -- Cách 3: Phím Space nếu hỗ trợ
+    -- 3. VirtualInputManager Phím Space (Nhảy trên PC)
     pcall(function()
         local vim = game:GetService("VirtualInputManager")
         if vim then
             vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-            task.wait(0.015)
+            task.wait(0.01)
             vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
         end
     end)
+
+    -- 4. Kích hoạt mọi button hoặc interactive object bên trong PlayArea
+    pcall(function()
+        if playArea then
+            for _, btn in ipairs(playArea:GetDescendants()) do
+                if (btn:IsA("TextButton") or btn:IsA("ImageButton")) and (btn.Visible == nil or btn.Visible == true) then
+                    if firesignal then
+                        pcall(function() firesignal(btn.MouseButton1Down) end)
+                        pcall(function() firesignal(btn.Activated) end)
+                        pcall(function() firesignal(btn.MouseButton1Click) end)
+                    end
+                end
+            end
+        end
+    end)
+
+    -- 5. Executor mouse1click / mousemoveabs nếu có
+    pcall(function()
+        if mousemoveabs then mousemoveabs(clickX, clickY) end
+        if mouse1click then mouse1click() end
+    end)
 end
 
-local function findFlappyGui()
+local function findFlappyComponents()
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not pg then return nil end
 
-    for _, gui in ipairs(pg:GetChildren()) do
-        if gui:IsA("ScreenGui") and (gui.Enabled == nil or gui.Enabled == true) then
-            local gName = gui.Name:lower()
-            if gName:find("flappy") or gName:find("train") or gName:find("minigame") or gName:find("race") then
-                return gui, nil, gui
+    local targetLabel = nil
+    for _, desc in ipairs(pg:GetDescendants()) do
+        if desc:IsA("TextLabel") and (desc.Visible == nil or desc.Visible == true) then
+            local txt = desc.Text
+            if txt and (txt:find("FLAPPY") or txt:find("flappy") or txt:find("NHẤP ĐỂ CHƠI") or txt:find("Mỗi ống") or txt:find("TỐT NHẤT") or txt:find("Thưởng")) then
+                targetLabel = desc
+                break
             end
-            
-            for _, desc in ipairs(gui:GetDescendants()) do
-                if desc:IsA("TextLabel") and (desc.Visible == nil or desc.Visible == true) then
-                    local txt = (desc.Text or ""):lower()
-                    if txt:find("flappy") or txt:find("nhấp để chơi") or txt:find("mỗi ống") or txt:find("tap to play") or txt:find("cuộc đua") then
-                        return gui, desc, desc.Parent
-                    end
+        end
+    end
+
+    if not targetLabel then return nil end
+
+    local current = targetLabel
+    local mainFrame = nil
+    while current and current.Parent and not current.Parent:IsA("ScreenGui") and current.Parent ~= pg do
+        current = current.Parent
+        if current:IsA("GuiObject") and current.AbsoluteSize and current.AbsoluteSize.X > 180 and current.AbsoluteSize.Y > 250 then
+            mainFrame = current
+        end
+    end
+    if not mainFrame and current and current:IsA("GuiObject") then mainFrame = current end
+    if not mainFrame then return nil end
+
+    local playArea = mainFrame
+    local maxAreaSize = 0
+    for _, desc in ipairs(mainFrame:GetDescendants()) do
+        if desc:IsA("GuiObject") and desc ~= mainFrame then
+            local sz = desc.AbsoluteSize and (desc.AbsoluteSize.X * desc.AbsoluteSize.Y) or 0
+            if sz > maxAreaSize and desc.AbsoluteSize.Y > 200 and desc.AbsoluteSize.X > 150 then
+                if (desc.AbsoluteSize.Y / desc.AbsoluteSize.X) > 0.7 then
+                    maxAreaSize = sz
+                    playArea = desc
                 end
             end
         end
     end
-    return nil
-end
 
-local function findBirdElement(container)
-    if not container then return nil end
-    local bestBird = nil
+    local startLabel = nil
+    local scoreLabel = nil
+    for _, desc in ipairs(mainFrame:GetDescendants()) do
+        if desc:IsA("TextLabel") and (desc.Visible == nil or desc.Visible == true) then
+            local txt = desc.Text or ""
+            local low = txt:lower()
+            if low:find("nhấp") or low:find("chơi") or low:find("tap") or low:find("play") then
+                startLabel = desc
+            elseif txt:match("^%d+$") then
+                scoreLabel = desc
+            end
+        end
+    end
 
-    pcall(function()
-        for _, desc in ipairs(container:GetDescendants()) do
-            if desc:IsA("GuiObject") and (desc.Visible == nil or desc.Visible == true) then
-                local name = desc.Name:lower()
-                if name:find("bird") or name:find("char") or name:find("player") or name:find("avatar") or name:find("icon") or name:find("box") then
-                    bestBird = desc
-                    return
+    local bird = nil
+    for _, desc in ipairs(playArea:GetDescendants()) do
+        if desc:IsA("GuiObject") and desc.Visible then
+            local name = desc.Name:lower()
+            local w, h = desc.AbsoluteSize and desc.AbsoluteSize.X or 0, desc.AbsoluteSize and desc.AbsoluteSize.Y or 0
+            if name:find("bird") or name:find("char") or name:find("player") or name:find("avatar") or name:find("chim") then
+                bird = desc
+                break
+            elseif w >= 15 and w <= 80 and h >= 15 and h <= 80 and math.abs(w - h) <= 25 then
+                if not name:find("close") and not name:find("exit") and not name:find("x") then
+                    bird = desc
                 end
             end
         end
-    end)
-    return bestBird
-end
+    end
 
-local function findPipeElements(container, bird)
     local pipes = {}
-    if not container then return pipes end
+    local birdX = bird and bird.AbsolutePosition and bird.AbsolutePosition.X or (playArea.AbsolutePosition and (playArea.AbsolutePosition.X + (playArea.AbsoluteSize.X * 0.25)) or 0)
+    for _, desc in ipairs(playArea:GetDescendants()) do
+        if desc:IsA("GuiObject") and desc ~= bird and desc.Visible then
+            local name = desc.Name:lower()
+            local w, h = desc.AbsoluteSize and desc.AbsoluteSize.X or 0, desc.AbsoluteSize and desc.AbsoluteSize.Y or 0
+            local isPipe = false
+            if name:find("pipe") or name:find("tube") or name:find("column") or name:find("pillar") or name:find("obstacle") or name:find("ống") then
+                isPipe = true
+            elseif h > 70 and w >= 20 and w <= 120 and h > w * 1.5 then
+                isPipe = true
+            end
 
-    pcall(function()
-        local birdX = bird and (bird.AbsolutePosition.X) or 0
-
-        for _, desc in ipairs(container:GetDescendants()) do
-            if desc:IsA("GuiObject") and desc ~= bird and (desc.Visible == nil or desc.Visible == true) then
-                local name = desc.Name:lower()
-                if name:find("pipe") or name:find("obstacle") or name:find("column") or name:find("pillar") or name:find("wall") or name:find("bar") or name:find("ống") then
-                    local px = desc.AbsolutePosition.X
-                    if px + desc.AbsoluteSize.X >= birdX - 10 then
-                        table.insert(pipes, {
-                            Part = desc,
-                            X = px,
-                            Y = desc.AbsolutePosition.Y,
-                            W = desc.AbsoluteSize.X,
-                            H = desc.AbsoluteSize.Y
-                        })
-                    end
+            if isPipe and desc.AbsolutePosition then
+                local px = desc.AbsolutePosition.X
+                if px + w >= birdX - 5 then
+                    table.insert(pipes, {
+                        Part = desc,
+                        X = px,
+                        Y = desc.AbsolutePosition.Y,
+                        W = w,
+                        H = h
+                    })
                 end
             end
         end
+    end
 
-        table.sort(pipes, function(a, b)
-            return a.X < b.X
-        end)
-    end)
+    table.sort(pipes, function(a, b) return a.X < b.X end)
 
-    return pipes
+    return {
+        MainFrame = mainFrame,
+        PlayArea = playArea,
+        Bird = bird,
+        Pipes = pipes,
+        StartLabel = startLabel,
+        ScoreLabel = scoreLabel,
+        TargetLabel = targetLabel
+    }
 end
 
 local function scanAndFireFlappyRemotes()
@@ -1636,8 +1697,8 @@ createToggleButton("🏃 Tự Động Vào Máy Luyện Tập (Auto Treadmill)",
 end)
 
 createActionButton("🎯 Thử Nhấp Nhảy Flappy 1 Lần", "Bấm để kiểm tra phản hồi nhấp nhảy của chim Flappy", Color3.fromRGB(255, 215, 0), function()
-    local gui, label, container = findFlappyGui()
-    triggerFlap(container or gui)
+    local info = findFlappyComponents()
+    performFlap(info)
     setStatus("🎯 Đã gửi tín hiệu nhấp nhảy Flappy!")
 end)
 
@@ -2018,62 +2079,82 @@ task.spawn(function()
     end
 end)
 
--- 8. 🐦 AUTO FLAPPY RACE & SMART TRAINING WORKER
+-- 8. 🐦 AUTO FLAPPY RACE & SMART TRAINING WORKER V2.0
 task.spawn(function()
     local lastFlap = 0
     local lastTrainScan = 0
+    local lastScore = -1
 
     while true do
-        task.wait(0.035)
+        task.wait(0.025)
 
         -- A. Tự động chơi Cuộc đua Flappy (+5% Tốc Độ Mỗi Ống)
         if State.AutoFlappy then
             pcall(function()
-                local flappyGui, flappyLabel, gameArea = findFlappyGui()
-                if flappyGui then
-                    -- 1. Tự động nhấp để bắt đầu chơi nếu đang ở màn hình chờ
-                    if State.AutoFlappyAutoStart and flappyLabel and (flappyLabel.Visible == nil or flappyLabel.Visible == true) then
-                        local lTxt = (flappyLabel.Text or ""):lower()
-                        if lTxt:find("nhấp") or lTxt:find("chơi") or lTxt:find("tap") or lTxt:find("play") or lTxt:find("click") then
-                            local now = os.clock()
-                            if now - lastFlap > 0.35 then
-                                triggerFlap(gameArea or flappyGui)
-                                lastFlap = now
-                            end
-                        end
-                    end
-
-                    -- 2. Quét vị trí Chú Chim (Bird) và Ống (Pipes)
-                    local bird = findBirdElement(gameArea or flappyGui)
-                    local pipes = findPipeElements(gameArea or flappyGui, bird)
-                    local area = gameArea or (bird and bird.Parent) or flappyGui
-
-                    if bird and area then
-                        local birdCenterY = bird.AbsolutePosition.Y + (bird.AbsoluteSize.Y / 2)
-                        local targetGapY = nil
-
-                        if State.AutoFlappyGodMode and #pipes > 0 then
-                            local closestPipe = pipes[1]
-                            if closestPipe.Part then
-                                targetGapY = closestPipe.Part.AbsolutePosition.Y + (closestPipe.Part.AbsoluteSize.Y / 2)
-                            end
-                        end
-
-                        if not targetGapY then
-                            targetGapY = area.AbsolutePosition.Y + (area.AbsoluteSize.Y * 0.48)
-                        end
-
+                local info = findFlappyComponents()
+                if info and info.PlayArea then
+                    -- 1. Nếu đang ở màn hình chờ ("NHẤP ĐỂ CHƠI" / "TAP TO PLAY")
+                    if State.AutoFlappyAutoStart and info.StartLabel and (info.StartLabel.Visible == nil or info.StartLabel.Visible == true) then
                         local now = os.clock()
-                        if (birdCenterY > targetGapY + 3) and (now - lastFlap > 0.12) then
-                            triggerFlap(area)
+                        if now - lastFlap > 0.30 then
+                            performFlap(info)
                             lastFlap = now
+                            setStatus("🐦 Flappy: Đã nhấp bắt đầu chơi!")
                         end
                     else
-                        -- Fallback duy trì nhịp nhảy nhịp nhàng
-                        local now = os.clock()
-                        if now - lastFlap > 0.32 then
-                            triggerFlap(area or flappyGui)
-                            lastFlap = now
+                        -- 2. Đang trong trận đấu: Quét chim và ống
+                        local bird = info.Bird
+                        local pipes = info.Pipes
+                        local playArea = info.PlayArea
+
+                        -- Cập nhật điểm hiển thị trên status bar
+                        if info.ScoreLabel and info.ScoreLabel.Text then
+                            local sc = tonumber(info.ScoreLabel.Text)
+                            if sc and sc ~= lastScore then
+                                lastScore = sc
+                                setStatus("🐦 Flappy: " .. sc .. " ống né (+ " .. (sc * 5) .. "% tốc độ)")
+                            end
+                        end
+
+                        if bird and bird.AbsolutePosition and playArea and playArea.AbsolutePosition then
+                            local birdH = bird.AbsoluteSize and bird.AbsoluteSize.Y or 40
+                            local birdY = bird.AbsolutePosition.Y + (birdH / 2)
+                            local targetGapY = nil
+
+                            if State.AutoFlappyGodMode and pipes and #pipes > 0 then
+                                local p1 = pipes[1]
+                                local p2 = pipes[2]
+
+                                if p2 and math.abs(p1.X - p2.X) < 35 then
+                                    local topPipe = (p1.Y < p2.Y) and p1 or p2
+                                    local bottomPipe = (p1.Y < p2.Y) and p2 or p1
+                                    local gapTop = topPipe.Y + topPipe.H
+                                    local gapBottom = bottomPipe.Y
+                                    targetGapY = (gapTop + gapBottom) / 2
+                                elseif p1 then
+                                    if p1.Y < (playArea.AbsolutePosition.Y + playArea.AbsoluteSize.Y * 0.4) then
+                                        targetGapY = p1.Y + p1.H + 50
+                                    else
+                                        targetGapY = p1.Y - 50
+                                    end
+                                end
+                            end
+
+                            if not targetGapY then
+                                targetGapY = playArea.AbsolutePosition.Y + (playArea.AbsoluteSize.Y * 0.48)
+                            end
+
+                            local now = os.clock()
+                            if (birdY > targetGapY + 3) and (now - lastFlap > 0.10) then
+                                performFlap(info)
+                                lastFlap = now
+                            end
+                        else
+                            local now = os.clock()
+                            if now - lastFlap > 0.28 then
+                                performFlap(info)
+                                lastFlap = now
+                            end
                         end
                     end
 
@@ -2088,8 +2169,8 @@ task.spawn(function()
             if now - lastTrainScan > 2.0 then
                 lastTrainScan = now
                 pcall(function()
-                    local flappyGui = findFlappyGui()
-                    if not flappyGui then
+                    local info = findFlappyComponents()
+                    if not info then
                         local hrp = getRootPart()
                         local stations = findTrainingStations()
                         if hrp and #stations > 0 then
