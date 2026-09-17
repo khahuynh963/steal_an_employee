@@ -153,6 +153,7 @@ local cachedEmployees = {}
 local cachedBosses = {}
 local lastScanTime = 0
 local isStealingInProgress = false
+local failedPromptBlacklist = {}
 
 -- ── Character Helpers ──
 local function getCharacter()
@@ -178,7 +179,6 @@ local function optimizePrompt(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return end
     pcall(function()
         prompt.RequiresLineOfSight = false
-        prompt.HoldDuration = 0
         prompt.MaxActivationDistance = 999999
         prompt.Enabled = true
     end)
@@ -190,13 +190,18 @@ local function triggerPrompt(prompt)
     pcall(function()
         if fireproximityprompt then
             fireproximityprompt(prompt, 0)
-            fireproximityprompt(prompt, 100)
+            fireproximityprompt(prompt, 1)
             fireproximityprompt(prompt)
         end
     end)
     pcall(function()
+        local hold = prompt.HoldDuration or 0
         prompt:InputHoldBegin()
-        task.wait(0.02)
+        if hold > 0 then
+            task.wait(hold + 0.08)
+        else
+            task.wait(0.1)
+        end
         prompt:InputHoldEnd()
     end)
 end
@@ -315,8 +320,79 @@ local function getEmployeeValue(emp)
     return bestVal + rarityBonus, rarity, labelFound
 end
 
--- ── Detect Player Office / Base ──
-local function getMyOffice()
+-- ── Kiểm Tra Tuyệt Đối Căn Nhà / Sân Của Bất Kỳ Người Chơi Nào ──
+local function isAnyPlayerHouseOrPlot(container)
+    if not container or container == Workspace then return false, nil end
+
+    local curr = container
+    while curr and curr ~= Workspace do
+        local cName = curr.Name:lower()
+        local parent = curr.Parent
+        local pName = parent and parent.Name:lower() or ""
+
+        -- 1. Thư mục chứa các căn nhà/sân người chơi trong Workspace
+        if pName == "plots" or pName == "houses" or pName == "tycoons" or pName == "bases" 
+           or pName == "playerplots" or pName == "playerbases" or pName == "playerhouses"
+           or pName == "playeroffices" or pName == "homes" or pName == "offices" then
+            return true, curr
+        end
+
+        -- 2. Tên object mang định dạng nhà/sân người chơi (Plot, House, Tycoon, Base, Home...)
+        if (cName:find("plot") or cName:find("house") or cName:find("tycoon") or cName:find("base") or cName:find("home"))
+           and not (cName:find("company") or cName:find("store") or cName:find("shop") or cName:find("building") or cName:find("city") or cName:find("zone")) then
+            return true, curr
+        end
+
+        -- 3. Kiểm tra Attributes sở hữu người chơi
+        for _, attr in ipairs({"Owner", "Player", "UserId", "Username", "PlotOwner", "ClaimedBy", "HouseOwner"}) do
+            local val = curr:GetAttribute(attr)
+            if val and tostring(val) ~= "" then
+                return true, curr
+            end
+        end
+
+        -- 4. Kiểm tra Value instances (Owner, Player, PlotOwner, OwnerDoor...)
+        if curr:FindFirstChild("Owner") or curr:FindFirstChild("Player") or curr:FindFirstChild("PlotOwner") or curr:FindFirstChild("OwnerDoor") then
+            return true, curr
+        end
+
+        -- 5. Kiểm tra kết cấu đặc thù chỉ có ở nhà người chơi (Két Sắt Vault hoặc thư mục Desks chứa bàn làm việc)
+        if (curr:FindFirstChild("Desks") or curr:FindFirstChild("Vault") or curr:FindFirstChild("Safe"))
+           and not (cName:find("bank") or cName:find("company")) then
+            return true, curr
+        end
+
+        -- 6. Kiểm tra nếu trùng tên/id của bất kỳ người chơi nào trong server
+        for _, p in ipairs(Players:GetPlayers()) do
+            local pn = p.Name:lower()
+            local pd = p.DisplayName:lower()
+            local pid = tostring(p.UserId)
+            if (cName:find(pn) or cName:find(pd) or cName:find(pid)) and not cName:find("boss") then
+                return true, curr
+            end
+        end
+
+        curr = curr.Parent
+    end
+
+    return false, nil
+end
+
+-- ── Kiểm Tra Nhà Người Chơi Khác (Hàng Xóm) ──
+local function isOtherPlayerOffice(container)
+    local isHouse, houseObj = isAnyPlayerHouseOrPlot(container)
+    if not isHouse then return false end
+
+    local myOff = getMyOffice()
+    if myOff and (container == myOff or container:IsDescendantOf(myOff) or houseObj == myOff) then
+        return false -- Đây là nhà của chính mình
+    end
+
+    return true -- Đây là nhà của người chơi khác / hàng xóm!
+end
+
+-- ── Xác Định Văn Phòng / Căn Nhà Của Chính Mình (LocalPlayer Office) ──
+function getMyOffice()
     if cachedMyOffice and cachedMyOffice.Parent then return cachedMyOffice end
 
     local myId = tostring(LocalPlayer.UserId)
@@ -325,11 +401,15 @@ local function getMyOffice()
 
     pcall(function()
         local folders = {
-            Workspace:FindFirstChild("Offices"),
             Workspace:FindFirstChild("Plots"),
+            Workspace:FindFirstChild("Houses"),
+            Workspace:FindFirstChild("Offices"),
+            Workspace:FindFirstChild("Tycoons"),
             Workspace:FindFirstChild("Bases"),
-            Workspace:FindFirstChild("Companies"),
-            Workspace:FindFirstChild("Tycoons")
+            Workspace:FindFirstChild("PlayerPlots"),
+            Workspace:FindFirstChild("PlayerBases"),
+            Workspace:FindFirstChild("PlayerHouses"),
+            Workspace:FindFirstChild("Homes")
         }
 
         for _, folder in ipairs(folders) do
@@ -340,10 +420,22 @@ local function getMyOffice()
                         cachedMyOffice = child
                         return child
                     end
+                    for _, attr in ipairs({"Owner", "Player", "UserId", "Username", "PlotOwner", "HouseOwner"}) do
+                        local val = child:GetAttribute(attr)
+                        if val and (tostring(val) == myId or tostring(val):lower() == pName or tostring(val):lower() == pDisp) then
+                            cachedMyOffice = child
+                            return child
+                        end
+                    end
                     local owner = child:FindFirstChild("Owner") or child:FindFirstChild("Player")
-                    if owner and (owner.Value == LocalPlayer or tostring(owner.Value):lower() == pName) then
-                        cachedMyOffice = child
-                        return child
+                    if owner then
+                        if owner:IsA("ObjectValue") and owner.Value == LocalPlayer then
+                            cachedMyOffice = child
+                            return child
+                        elseif tostring(owner.Value):lower() == pName or tostring(owner.Value) == myId then
+                            cachedMyOffice = child
+                            return child
+                        end
                     end
                 end
             end
@@ -352,9 +444,28 @@ local function getMyOffice()
         -- Direct child in Workspace
         for _, child in ipairs(Workspace:GetChildren()) do
             local cName = child.Name:lower()
-            if (cName:find("office") or cName:find("plot") or cName:find("base")) and (cName:find(myId) or cName:find(pName)) then
+            if (cName:find("plot") or cName:find("house") or cName:find("office") or cName:find("base")) 
+               and not (cName:find("company") or cName:find("building"))
+               and (cName:find(myId) or cName:find(pName) or cName:find(pDisp)) then
                 cachedMyOffice = child
                 return child
+            end
+        end
+
+        -- Fallback: Tìm plot chứa bàn làm việc có prompt "Place"
+        for _, folder in ipairs(folders) do
+            if folder then
+                for _, child in ipairs(folder:GetChildren()) do
+                    for _, desc in ipairs(child:GetDescendants()) do
+                        if desc:IsA("ProximityPrompt") and desc.Enabled then
+                            local act = (desc.ActionText or ""):lower()
+                            if act:find("place") or act:find("đặt") or act:find("claim") then
+                                cachedMyOffice = child
+                                return child
+                            end
+                        end
+                    end
+                end
             end
         end
     end)
@@ -362,55 +473,47 @@ local function getMyOffice()
     return cachedMyOffice
 end
 
--- ── Check if container belongs to another player ──
-local function isOtherPlayerOffice(container)
-    if not container or container == Workspace then return false end
-    local myOff = getMyOffice()
-    if myOff and (container == myOff or container:IsDescendantOf(myOff)) then
-        return false
-    end
-
-    local myId = tostring(LocalPlayer.UserId)
-    local curr = container
-    while curr and curr ~= Workspace do
-        local cName = curr.Name:lower()
-        if cName:find("office") or cName:find("plot") or cName:find("base") or cName:find("company") or cName:find("tycoon") then
-            local pId = cName:match("(%d+)")
-            if pId and pId ~= myId then return true end
-            for _, attr in ipairs({"Owner", "Player", "UserId", "Username"}) do
-                local val = curr:GetAttribute(attr)
-                if val and tostring(val) ~= myId and tostring(val):lower() ~= LocalPlayer.Name:lower() then
-                    return true
-                end
-            end
-            local owner = curr:FindFirstChild("Owner") or curr:FindFirstChild("Player")
-            if owner and owner.Value ~= LocalPlayer then
-                return true
-            end
-        end
-        curr = curr.Parent
-    end
-
-    return false
-end
-
 -- ── Scanner: Available Desks in Player's Office ──
 local function getAvailableDesks()
     local desks = {}
     local office = getMyOffice()
-    if not office then return desks end
 
     pcall(function()
-        for _, desc in ipairs(office:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") and desc.Enabled then
-                local act = (desc.ActionText or ""):lower()
-                local obj = (desc.ObjectText or ""):lower()
-                local pName = desc.Parent and desc.Parent.Name:lower() or ""
+        local searchRoots = {}
+        if office then table.insert(searchRoots, office) end
 
-                if act:find("place") or act:find("sit") or act:find("assign") or act:find("put") 
-                   or act:find("đặt") or act:find("ngồi") or obj:find("desk") or obj:find("chair") 
-                   or pName:find("desk") or pName:find("chair") or pName:find("workstation") then
-                    table.insert(desks, desc)
+        if #searchRoots == 0 then
+            local plotFolders = {
+                Workspace:FindFirstChild("Plots"),
+                Workspace:FindFirstChild("Houses"),
+                Workspace:FindFirstChild("Offices"),
+                Workspace:FindFirstChild("Tycoons"),
+                Workspace:FindFirstChild("Bases")
+            }
+            for _, pf in ipairs(plotFolders) do
+                if pf then
+                    for _, child in ipairs(pf:GetChildren()) do
+                        if not isOtherPlayerOffice(child) then
+                            table.insert(searchRoots, child)
+                        end
+                    end
+                end
+            end
+        end
+
+        for _, root in ipairs(searchRoots) do
+            for _, desc in ipairs(root:GetDescendants()) do
+                if desc:IsA("ProximityPrompt") and desc.Enabled then
+                    local act = (desc.ActionText or ""):lower()
+                    local obj = (desc.ObjectText or ""):lower()
+                    local pName = desc.Parent and desc.Parent.Name:lower() or ""
+
+                    if act:find("place") or act:find("sit") or act:find("assign") or act:find("put") 
+                       or act:find("đặt") or act:find("ngồi") or obj:find("desk") or obj:find("chair") 
+                       or pName:find("desk") or pName:find("chair") or pName:find("workstation")
+                       or obj:find("seat") then
+                        table.insert(desks, desc)
+                    end
                 end
             end
         end
@@ -474,70 +577,103 @@ local function getNearbyBosses()
     return bosses
 end
 
--- ── Scanner: Stealable Employees Across Companies ──
+-- ── Scanner: Stealable Employees Across Companies (KHÔNG BAO GIỜ QUÉT NHÀ HÀNG XÓM) ──
 local function getStealableEmployees()
     local list = {}
     local hrp = getRootPart()
-    local myOff = getMyOffice()
+    local now = os.clock()
 
     pcall(function()
-        -- 1. Tìm các Folder công ty / Spawn / Map
-        local targets = {}
-        for _, name in ipairs({"Companies", "Spawns", "Employees", "Workers", "NPCs", "Map", "Buildings"}) do
+        -- 1. Xác định các Folder hoặc Model công ty / bản đồ
+        local searchTargets = {}
+        for _, name in ipairs({"Companies", "Company", "Buildings", "Spawns", "Employees", "Workers", "NPCs", "Map", "Stores", "City", "Zones"}) do
             local f = Workspace:FindFirstChild(name)
-            if f then table.insert(targets, f) end
+            if f then table.insert(searchTargets, f) end
         end
 
-        if #targets == 0 then
+        if #searchTargets == 0 then
             for _, child in ipairs(Workspace:GetChildren()) do
-                if child:IsA("Folder") or child:IsA("Model") then
+                if (child:IsA("Folder") or child:IsA("Model")) and not isAnyPlayerHouseOrPlot(child) and child ~= LocalPlayer.Character then
                     local n = child.Name:lower()
-                    if (n:find("company") or n:find("zone") or n:find("office") or n:find("city")) and child ~= myOff then
-                        table.insert(targets, child)
+                    if n:find("company") or n:find("zone") or n:find("build") or n:find("store") or n:find("shop") or n:find("city") or n:find("spawn") or n:find("npc") or n:find("worker") or n:find("employee") then
+                        table.insert(searchTargets, child)
                     end
                 end
             end
         end
 
-        if #targets == 0 then table.insert(targets, Workspace) end
+        if #searchTargets == 0 then
+            table.insert(searchTargets, Workspace)
+        end
 
-        for _, target in ipairs(targets) do
+        -- 2. Quét ProximityPrompts trong các công ty
+        for _, target in ipairs(searchTargets) do
             for _, desc in ipairs(target:GetDescendants()) do
                 if desc:IsA("ProximityPrompt") and desc.Enabled then
                     local parent = desc.Parent
-                    if parent and not isOtherPlayerOffice(parent) then
+                    
+                    -- LOẠI TRỪ 100% NẾU THUỘC BẤT KỲ NHÀ NGƯỜI CHƠI NÀO (CẢ NHÀ MÌNH LẪN NHÀ HÀNG XÓM)
+                    if parent and not isAnyPlayerHouseOrPlot(parent) then
                         local act = (desc.ActionText or ""):lower()
                         local obj = (desc.ObjectText or ""):lower()
                         local pName = parent.Name:lower()
 
-                        local isStealPrompt = act:find("steal") or act:find("take") or act:find("grab") or act:find("cướp")
-                                           or act:find("hire") or act:find("recruit") or act:find("lấy") or act:find("bắt")
-                                           or obj:find("employee") or obj:find("worker") or obj:find("nhân viên")
-                                           or pName:find("employee") or pName:find("worker")
+                        -- Bỏ qua cửa, xe, ghế ngồi, thang máy, nút bấm
+                        local isIgnored = act:find("door") or act:find("gate") or act:find("car") or act:find("drive") 
+                                       or act:find("sit") or act:find("elevator") or act:find("lift") or act:find("button")
+                                       or pName:find("door") or pName:find("gate") or pName:find("seat")
 
-                        if isStealPrompt then
+                        if not isIgnored then
                             local model = parent
                             while model and not model:IsA("Model") and model ~= Workspace do
                                 model = model.Parent
                             end
                             local empModel = (model and model:IsA("Model")) and model or parent
-                            local score, rarity, labelTxt = getEmployeeValue(empModel)
 
-                            local pos = parent:IsA("BasePart") and parent.Position 
-                                     or (empModel:IsA("Model") and empModel.PrimaryPart and empModel.PrimaryPart.Position)
-                                     or (empModel:FindFirstChildWhichIsA("BasePart") and empModel:FindFirstChildWhichIsA("BasePart").Position)
+                            -- Đảm bảo không phải nhân vật người chơi và không phải Boss
+                            local isPlayerChar = false
+                            for _, p in ipairs(Players:GetPlayers()) do
+                                if p.Character == empModel then isPlayerChar = true break end
+                            end
 
-                            if pos then
-                                local dist = hrp and (hrp.Position - pos).Magnitude or 0
-                                table.insert(list, {
-                                    Prompt = desc,
-                                    Model = empModel,
-                                    Position = pos,
-                                    Score = score,
-                                    Rarity = rarity,
-                                    Label = labelTxt,
-                                    Distance = dist
-                                })
+                            local isBoss = false
+                            local mName = empModel.Name:lower()
+                            if mName:find("boss") or mName:find("guard") or mName:find("security") or mName:find("police") or mName:find("killer") then
+                                isBoss = true
+                            end
+
+                            if not isAnyPlayerHouseOrPlot(empModel) and not isPlayerChar and not isBoss then
+                                local hasHum = empModel:FindFirstChildOfClass("Humanoid") ~= nil
+                                local isStealAct = act:find("steal") or act:find("take") or act:find("grab") or act:find("cướp")
+                                                or act:find("hire") or act:find("recruit") or act:find("lấy") or act:find("bắt")
+                                                or act:find("kidnap") or act:find("pick") or act:find("trộm")
+                                local isEmpObj = obj:find("employee") or obj:find("worker") or obj:find("nhân viên")
+                                              or obj:find("staff") or obj:find("intern") or pName:find("employee") or pName:find("worker")
+
+                                if isStealAct or isEmpObj or hasHum then
+                                    local score, rarity, labelTxt = getEmployeeValue(empModel)
+                                    local part = parent:IsA("BasePart") and parent 
+                                              or (empModel:IsA("Model") and (empModel.PrimaryPart or empModel:FindFirstChildWhichIsA("BasePart")))
+                                    local pos = part and part.Position
+
+                                    if pos then
+                                        local promptKey = tostring(desc:GetDebugId and desc:GetDebugId() or desc)
+                                        if not failedPromptBlacklist[promptKey] or (now - failedPromptBlacklist[promptKey]) > 6.0 then
+                                            local dist = hrp and (hrp.Position - pos).Magnitude or 0
+                                            table.insert(list, {
+                                                Prompt = desc,
+                                                Model = empModel,
+                                                Part = part,
+                                                Position = pos,
+                                                Score = score,
+                                                Rarity = rarity,
+                                                Label = labelTxt,
+                                                Distance = dist,
+                                                Key = promptKey
+                                            })
+                                        end
+                                    end
+                                end
                             end
                         end
                     end
@@ -546,7 +682,6 @@ local function getStealableEmployees()
         end
     end)
 
-    -- Sắp xếp theo giá trị $/s cao nhất (hoặc độ hiếm cao nhất)
     table.sort(list, function(a, b)
         if State.StealHighestValue then
             return a.Score > b.Score
@@ -569,8 +704,120 @@ local function safeGlideTo(targetPos)
     task.wait(0.08)
 
     -- Hạ nhanh xuống ngay vị trí tương tác
-    hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+    hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
     task.wait(0.05)
+end
+
+-- ── Kiểm Tra Có Cầm Hoặc Chứa Nhân Viên Trong Người Không ──
+local function hasEmployeeInInventoryOrHand()
+    local char = getCharacter()
+    local bp = getBackpack()
+
+    local function isEmployeeTool(t)
+        if not t or not t:IsA("Tool") then return false end
+        local n = t.Name:lower()
+        if n:find("bat") or n:find("sword") or n:find("gun") or n:find("hammer") or n:find("bonk") or n:find("weapon") then
+            return false
+        end
+        return true
+    end
+
+    if char then
+        for _, item in ipairs(char:GetChildren()) do
+            if isEmployeeTool(item) then return true, item end
+            if item:IsA("Model") and not item:FindFirstChildOfClass("Humanoid") then
+                local n = item.Name:lower()
+                if n:find("employee") or n:find("worker") or n:find("staff") or n:find("carry") then
+                    return true, item
+                end
+            end
+        end
+    end
+
+    if bp then
+        for _, item in ipairs(bp:GetChildren()) do
+            if isEmployeeTool(item) then return true, item end
+        end
+    end
+
+    return false, nil
+end
+
+-- ── Kích Hoạt Hành Động Cướp Nhân Viên Đa Năng (Multi-Method Steal) ──
+local function triggerSteal(targetEmp)
+    if not targetEmp then return false end
+    local hrp = getRootPart()
+    local char = getCharacter()
+    if not hrp or not char then return false end
+
+    local targetPos = targetEmp.Position
+    local prompt = targetEmp.Prompt
+    local part = targetEmp.Part
+
+    -- Tiếp cận an toàn
+    if State.SafeFlight then
+        safeGlideTo(targetPos)
+    else
+        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
+        task.wait(0.06)
+    end
+
+    -- 1. Kích hoạt ProximityPrompt với thời gian giữ chuẩn
+    if prompt and prompt:IsA("ProximityPrompt") then
+        pcall(function()
+            prompt.RequiresLineOfSight = false
+            prompt.MaxActivationDistance = 999999
+            prompt.Enabled = true
+        end)
+        pcall(function()
+            if fireproximityprompt then
+                fireproximityprompt(prompt, 0)
+                fireproximityprompt(prompt, 1)
+                fireproximityprompt(prompt)
+            end
+        end)
+        pcall(function()
+            local hold = prompt.HoldDuration or 0
+            prompt:InputHoldBegin()
+            if hold > 0 then
+                task.wait(hold + 0.1)
+            else
+                task.wait(0.12)
+            end
+            prompt:InputHoldEnd()
+        end)
+    end
+
+    -- 2. Va chạm vật lý TouchInterest (Cho game có cơ chế chạm để nhặt)
+    if firetouchinterest and part and part:IsA("BasePart") then
+        pcall(function()
+            firetouchinterest(hrp, part, 0)
+            task.wait(0.02)
+            firetouchinterest(hrp, part, 1)
+        end)
+    end
+
+    -- 3. ClickDetector (nếu có)
+    if fireclickdetector and targetEmp.Model then
+        pcall(function()
+            local cd = targetEmp.Model:FindFirstChildWhichIsA("ClickDetector", true)
+            if cd then fireclickdetector(cd) end
+        end)
+    end
+
+    -- 4. Bắn RemoteEvent (nếu game dùng Remote trộm)
+    pcall(function()
+        for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
+            if rem:IsA("RemoteEvent") then
+                local rn = rem.Name:lower()
+                if rn:find("steal") or rn:find("grab") or rn:find("take") or rn:find("kidnap") or rn:find("claim") then
+                    rem:FireServer(targetEmp.Model or part or prompt)
+                end
+            end
+        end
+    end)
+
+    return true
 end
 
 -- ── 3D Visuals & Employee ESP ──
@@ -1245,120 +1492,123 @@ end)
 -- 1. 🏃 AUTO STEAL & BRING TO OFFICE ENGINE
 task.spawn(function()
     while true do
-        task.wait(0.6)
+        task.wait(0.5)
         if State.AutoSteal and not isStealingInProgress then
             pcall(function()
                 local hrp = getRootPart()
                 local char = getCharacter()
                 local bp = getBackpack()
-                if not hrp then return end
+                if not hrp or not char then return end
 
-                -- Kiểm tra xem người chơi đã đang cầm nhân viên trên tay chưa
-                local hasEmployeeInHand = false
-                if char then
-                    for _, item in ipairs(char:GetChildren()) do
-                        if item:IsA("Tool") or item.Name:lower():find("employee") or item.Name:lower():find("worker") then
-                            hasEmployeeInHand = true break
-                        end
-                    end
-                end
-
-                -- Nếu đã vác nhân viên trên tay -> bay về văn phòng và xếp vào bàn ngay
-                if hasEmployeeInHand then
+                -- 1. Kiểm tra xem người chơi đã đang cầm nhân viên trên tay hoặc trong túi đồ chưa
+                local hasEmp, empTool = hasEmployeeInInventoryOrHand()
+                if hasEmp then
                     local myOff = getMyOffice()
-                    if myOff then
-                        local desks = getAvailableDesks()
-                        if #desks > 0 then
-                            local deskPrompt = desks[1]
-                            local dPos = deskPrompt.Parent:IsA("BasePart") and deskPrompt.Parent.Position 
-                                      or (deskPrompt.Parent:IsA("Model") and deskPrompt.Parent.PrimaryPart and deskPrompt.Parent.PrimaryPart.Position)
-                            if dPos then
-                                setStatus("🪑 Đang xếp nhân viên vào bàn làm việc...")
-                                hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 3, 0))
-                                task.wait(0.1)
-                                triggerPrompt(deskPrompt)
-                                task.wait(0.4)
+                    local desks = getAvailableDesks()
+                    if #desks > 0 then
+                        local deskPrompt = desks[1]
+                        local dPart = deskPrompt.Parent
+                        local dPos = dPart:IsA("BasePart") and dPart.Position 
+                                  or (dPart:IsA("Model") and dPart.PrimaryPart and dPart.PrimaryPart.Position)
+                        if dPos then
+                            setStatus("🪑 Đang đặt nhân viên vào bàn làm việc của bạn...")
+                            hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 2.5, 0))
+                            task.wait(0.08)
+
+                            if empTool and empTool.Parent == bp then
+                                local hum = getHumanoid()
+                                if hum then hum:EquipTool(empTool) end
+                                task.wait(0.08)
+                            end
+
+                            triggerPrompt(deskPrompt)
+                            if empTool then pcall(function() empTool:Activate() end) end
+                            if firetouchinterest and dPart:IsA("BasePart") then
+                                firetouchinterest(hrp, dPart, 0)
+                                task.wait(0.02)
+                                firetouchinterest(hrp, dPart, 1)
+                            end
+                            task.wait(0.4)
+                            setStatus("✅ Đã đặt nhân viên vào bàn thành công!")
+                        end
+                    else
+                        if myOff then
+                            local offPos = myOff:IsA("BasePart") and myOff.Position 
+                                        or (myOff:IsA("Model") and myOff.PrimaryPart and myOff.PrimaryPart.Position)
+                            if offPos then
+                                hrp.CFrame = CFrame.new(offPos + Vector3.new(0, 4, 0))
+                                setStatus("⚠️ Hết bàn trống! Hãy mua thêm bàn hoặc nâng cấp văn phòng!")
+                                task.wait(1.0)
                             end
                         end
                     end
                     return
                 end
 
-                -- Tìm nhân viên tốt nhất để đánh cắp
+                -- 2. Quét tìm nhân viên công ty (ĐÃ LOẠI TRỪ 100% NHÀ HÀNG XÓM)
                 local employees = getStealableEmployees()
                 if #employees == 0 then
-                    setStatus("🔍 Đang quét các công ty tìm nhân viên...")
+                    setStatus("🔍 Đang tìm nhân viên tại các công ty (Đã lọc bỏ nhà hàng xóm)...")
                     return
                 end
 
-                -- Lọc theo độ hiếm tối thiểu
+                -- 3. Lọc theo độ hiếm
                 local targetEmp = nil
                 local minRarity = ALL_RARITIES[State.MinRarityIndex]
-
                 for _, emp in ipairs(employees) do
                     local pass = true
-                    if minRarity == "Rare+" then
-                        pass = emp.Rarity ~= "Common"
-                    elseif minRarity == "Epic+" then
-                        pass = emp.Rarity ~= "Common" and emp.Rarity ~= "Rare"
-                    elseif minRarity == "Legendary+" then
-                        pass = emp.Rarity == "Legendary" or emp.Rarity == "Mythic" or emp.Rarity == "Mythical" or emp.Rarity == "Divine" or emp.Rarity == "Secret"
-                    elseif minRarity == "Mythic+" then
-                        pass = emp.Rarity == "Mythic" or emp.Rarity == "Mythical" or emp.Rarity == "Divine" or emp.Rarity == "Secret"
-                    elseif minRarity == "Divine/Secret" then
-                        pass = emp.Rarity == "Divine" or emp.Rarity == "Secret"
+                    if minRarity == "Rare+" then pass = emp.Rarity ~= "Common"
+                    elseif minRarity == "Epic+" then pass = emp.Rarity ~= "Common" and emp.Rarity ~= "Rare"
+                    elseif minRarity == "Legendary+" then pass = emp.Rarity == "Legendary" or emp.Rarity == "Mythic" or emp.Rarity == "Mythical" or emp.Rarity == "Divine" or emp.Rarity == "Secret"
+                    elseif minRarity == "Mythic+" then pass = emp.Rarity == "Mythic" or emp.Rarity == "Mythical" or emp.Rarity == "Divine" or emp.Rarity == "Secret"
+                    elseif minRarity == "Divine/Secret" then pass = emp.Rarity == "Divine" or emp.Rarity == "Secret"
                     end
 
-                    if pass then
-                        targetEmp = emp
-                        break
-                    end
+                    if pass then targetEmp = emp break end
                 end
 
                 if not targetEmp then targetEmp = employees[1] end
-                if not targetEmp or not targetEmp.Prompt or not targetEmp.Prompt.Parent then return end
+                if not targetEmp then return end
 
                 isStealingInProgress = true
-                setStatus("🚀 Đang bay tới cướp: [" .. targetEmp.Rarity .. "] " .. targetEmp.Model.Name .. "...")
+                setStatus("🚀 Đang bay tới trộm: [" .. targetEmp.Rarity .. "] " .. targetEmp.Model.Name .. "...")
 
-                -- Bay an toàn tiếp cận nhân viên (tránh Boss)
-                if State.SafeFlight then
-                    safeGlideTo(targetEmp.Position)
-                else
-                    hrp.CFrame = CFrame.new(targetEmp.Position + Vector3.new(0, 3, 0))
-                    task.wait(0.05)
+                -- 4. Thực hiện cướp nhân viên
+                triggerSteal(targetEmp)
+
+                -- Đợi tối đa 1.0 giây xem đã lấy được nhân viên chưa
+                local gotItem = false
+                local startTime = os.clock()
+                while (os.clock() - startTime) < 1.0 do
+                    task.wait(0.1)
+                    local hasNow, _ = hasEmployeeInInventoryOrHand()
+                    if hasNow then gotItem = true break end
                 end
 
-                -- Kích hoạt trộm tức thời
-                triggerPrompt(targetEmp.Prompt)
-                task.wait(0.2)
-
-                -- Tự động bay về văn phòng của mình
-                local myOff = getMyOffice()
-                if myOff then
+                if gotItem then
+                    setStatus("🎉 Đã cướp thành công [" .. targetEmp.Rarity .. "]! Đang bay về văn phòng...")
+                    local myOff = getMyOffice()
                     local desks = getAvailableDesks()
                     if #desks > 0 then
                         local dPrompt = desks[1]
-                        local dPos = dPrompt.Parent:IsA("BasePart") and dPrompt.Parent.Position 
-                                  or (dPrompt.Parent:IsA("Model") and dPrompt.Parent.PrimaryPart and dPrompt.Parent.PrimaryPart.Position)
+                        local dPart = dPrompt.Parent
+                        local dPos = dPart:IsA("BasePart") and dPart.Position 
+                                  or (dPart:IsA("Model") and dPart.PrimaryPart and dPart.PrimaryPart.Position)
                         if dPos then
-                            setStatus("🪑 Đã cướp thành công! Đang đặt vào bàn làm việc...")
-                            hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 3, 0))
-                            task.wait(0.12)
+                            hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 2.5, 0))
+                            task.wait(0.1)
                             triggerPrompt(dPrompt)
-                            task.wait(0.4)
-                        end
-                    else
-                        local offPos = myOff:IsA("BasePart") and myOff.Position 
-                                    or (myOff:IsA("Model") and myOff.PrimaryPart and myOff.PrimaryPart.Position)
-                        if offPos then
-                            hrp.CFrame = CFrame.new(offPos + Vector3.new(0, 5, 0))
+                            task.wait(0.3)
                         end
                     end
+                else
+                    -- Đánh dấu blacklist 6 giây nếu không thể lấy mục tiêu này
+                    failedPromptBlacklist[targetEmp.Key] = os.clock()
+                    setStatus("⏳ Thử trộm nhân viên khác...")
                 end
 
                 isStealingInProgress = false
-                task.wait(0.5)
+                task.wait(0.4)
             end)
             isStealingInProgress = false
         end
@@ -1375,28 +1625,14 @@ task.spawn(function()
                 local bp = getBackpack()
                 local hrp = getRootPart()
 
-                local empTool = nil
-                if char then
-                    for _, t in ipairs(char:GetChildren()) do
-                        if t:IsA("Tool") and (t.Name:lower():find("employee") or t.Name:lower():find("worker") or t.Name:lower():find("staff")) then
-                            empTool = t break
-                        end
-                    end
-                end
-                if not empTool and bp then
-                    for _, t in ipairs(bp:GetChildren()) do
-                        if t:IsA("Tool") and (t.Name:lower():find("employee") or t.Name:lower():find("worker") or t.Name:lower():find("staff")) then
-                            empTool = t break
-                        end
-                    end
-                end
-
-                if empTool then
+                local hasEmp, empTool = hasEmployeeInInventoryOrHand()
+                if hasEmp and empTool then
                     local desks = getAvailableDesks()
                     if #desks > 0 then
                         local deskPrompt = desks[1]
-                        local dPos = deskPrompt.Parent:IsA("BasePart") and deskPrompt.Parent.Position 
-                                  or (deskPrompt.Parent:IsA("Model") and deskPrompt.Parent.PrimaryPart and deskPrompt.Parent.PrimaryPart.Position)
+                        local dPart = deskPrompt.Parent
+                        local dPos = dPart:IsA("BasePart") and dPart.Position 
+                                  or (dPart:IsA("Model") and dPart.PrimaryPart and dPart.PrimaryPart.Position)
 
                         if char and empTool.Parent == bp then
                             local hum = getHumanoid()
@@ -1405,9 +1641,15 @@ task.spawn(function()
                         end
 
                         if hrp and dPos then
-                            hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 3, 0))
+                            hrp.CFrame = CFrame.new(dPos + Vector3.new(0, 2.5, 0))
                             task.wait(0.08)
                             triggerPrompt(deskPrompt)
+                            if empTool then pcall(function() empTool:Activate() end) end
+                            if firetouchinterest and dPart:IsA("BasePart") then
+                                firetouchinterest(hrp, dPart, 0)
+                                task.wait(0.02)
+                                firetouchinterest(hrp, dPart, 1)
+                            end
                             task.wait(0.4)
                         end
                     end
