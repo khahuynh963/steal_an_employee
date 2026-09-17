@@ -668,7 +668,10 @@ local function getStealableEmployees()
                                     local pos = part and part.Position
 
                                     if pos then
-                                        local promptKey = tostring(desc:GetDebugId and desc:GetDebugId() or desc)
+                                        local promptKey = tostring(desc)
+                                        pcall(function()
+                                            if desc.GetDebugId then promptKey = tostring(desc:GetDebugId()) end
+                                        end)
                                         if not failedPromptBlacklist[promptKey] or (now - failedPromptBlacklist[promptKey]) > 6.0 then
                                             local dist = hrp and (hrp.Position - pos).Magnitude or 0
                                             table.insert(list, {
