@@ -1437,6 +1437,14 @@ createToggleButton("👻 Đi Xuyên Tường (Noclip)", State.Noclip, function(v
     State.Noclip = v
 end)
 
+createActionButton("🚀 Lướt Xuyên Cửa / Pha CFrame Qua Tường (25m)", "Bấm để phóng người xuyên thẳng qua cánh cửa phía trước", Color3.fromRGB(255, 170, 0), function()
+    local hrp = getRootPart()
+    if hrp then
+        hrp.CFrame = hrp.CFrame * CFrame.new(0, 0, -25)
+        setStatus("🚀 Đã lướt CFrame xuyên qua cánh cửa 25 studs!")
+    end
+end)
+
 createToggleButton("🛡️ Chống Văng Game 24/7 (Anti-AFK)", State.AntiAFK, function(v)
     State.AntiAFK = v
 end)
@@ -1458,7 +1466,7 @@ RunService.Stepped:Connect(function()
     if State.Noclip then
         local char = getCharacter()
         if char then
-            for _, part in ipairs(char:GetChildren()) do
+            for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then part.CanCollide = false end
             end
         end
