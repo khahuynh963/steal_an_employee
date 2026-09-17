@@ -27,40 +27,51 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
 
+repeat task.wait() until Players.LocalPlayer
 local LocalPlayer = Players.LocalPlayer
 
--- ── Safe GUI Container Helper ──
-local function getGuiContainer()
-    local container = nil
+-- ── Safe GUI Parenting Helper (Tương thích 100% mọi Executor) ──
+local function safeParentGui(gui)
+    local parented = false
+
+    -- 1. Ưu tiên gethui() (Ẩn CoreGui an toàn)
     pcall(function()
         if gethui then
-            container = gethui()
-        elseif syn and syn.protect_gui then
-            local f = Instance.new("Folder")
-            syn.protect_gui(f)
-            f.Parent = game:GetService("CoreGui")
-            container = f
-        elseif game:GetService("CoreGui") then
-            container = game:GetService("CoreGui")
+            gui.Parent = gethui()
+            parented = true
         end
     end)
-    if not container then
-        pcall(function()
-            container = LocalPlayer:WaitForChild("PlayerGui")
-        end)
-    end
-    return container
+    if parented and gui.Parent then return true end
+
+    -- 2. Thử CoreGui
+    pcall(function()
+        gui.Parent = game:GetService("CoreGui")
+        parented = true
+    end)
+    if parented and gui.Parent then return true end
+
+    -- 3. Fallback PlayerGui (Chạy mượt trên mọi thiết bị và executor di động)
+    pcall(function()
+        local pg = LocalPlayer:WaitForChild("PlayerGui", 5) or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then
+            gui.Parent = pg
+            parented = true
+        end
+    end)
+
+    return parented
 end
 
 -- Clear old GUI instances
 pcall(function()
-    local c = getGuiContainer()
-    if c and c:FindFirstChild("StealEmployeeGui") then
-        c.StealEmployeeGui:Destroy()
+    if gethui then
+        local g = gethui():FindFirstChild("StealEmployeeGui")
+        if g then g:Destroy() end
     end
-    if game:GetService("CoreGui"):FindFirstChild("StealEmployeeGui") then
-        game:GetService("CoreGui").StealEmployeeGui:Destroy()
-    end
+    pcall(function()
+        local cg = game:GetService("CoreGui"):FindFirstChild("StealEmployeeGui")
+        if cg then cg:Destroy() end
+    end)
     if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("StealEmployeeGui") then
         LocalPlayer.PlayerGui.StealEmployeeGui:Destroy()
     end
@@ -378,21 +389,8 @@ local function isAnyPlayerHouseOrPlot(container)
     return false, nil
 end
 
--- ── Kiểm Tra Nhà Người Chơi Khác (Hàng Xóm) ──
-local function isOtherPlayerOffice(container)
-    local isHouse, houseObj = isAnyPlayerHouseOrPlot(container)
-    if not isHouse then return false end
-
-    local myOff = getMyOffice()
-    if myOff and (container == myOff or container:IsDescendantOf(myOff) or houseObj == myOff) then
-        return false -- Đây là nhà của chính mình
-    end
-
-    return true -- Đây là nhà của người chơi khác / hàng xóm!
-end
-
 -- ── Xác Định Văn Phòng / Căn Nhà Của Chính Mình (LocalPlayer Office) ──
-function getMyOffice()
+local function getMyOffice()
     if cachedMyOffice and cachedMyOffice.Parent then return cachedMyOffice end
 
     local myId = tostring(LocalPlayer.UserId)
@@ -471,6 +469,19 @@ function getMyOffice()
     end)
 
     return cachedMyOffice
+end
+
+-- ── Kiểm Tra Nhà Người Chơi Khác (Hàng Xóm) ──
+local function isOtherPlayerOffice(container)
+    local isHouse, houseObj = isAnyPlayerHouseOrPlot(container)
+    if not isHouse then return false end
+
+    local myOff = getMyOffice()
+    if myOff and (container == myOff or container:IsDescendantOf(myOff) or houseObj == myOff) then
+        return false -- Đây là nhà của chính mình
+    end
+
+    return true -- Đây là nhà của người chơi khác / hàng xóm!
 end
 
 -- ── Scanner: Available Desks in Player's Office ──
@@ -920,8 +931,7 @@ ScreenGui.Name = "StealEmployeeGui"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-local container = getGuiContainer()
-ScreenGui.Parent = container
+safeParentGui(ScreenGui)
 
 -- Toggle Floating Button (💼)
 local ToggleIcon = Instance.new("TextButton")
@@ -1818,3 +1828,12 @@ pcall(function()
 end)
 
 setStatus("✅ Đã khởi chạy Steal An Employee V1.0 thành công!")
+
+pcall(function()
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "💼 Steal An Employee!",
+        Text = "✅ Đã tải Hub thành công! Bấm icon 💼 để bật/tắt menu.",
+        Duration = 6
+    })
+end)
+print("✅ [Steal An Employee] Ultimate Auto Hub loaded successfully!")
